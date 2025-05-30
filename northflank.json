@@ -1,0 +1,29 @@
+{
+  "apiVersion": "v1",
+  "spec": {
+    "kind": "Workflow",
+    "spec": {
+      "type": "sequential",
+      "steps": [
+        {
+          "name": "build-and-deploy",
+          "spec": {
+            "kind": "Build",
+            "spec": {
+              "id": "youtube-telegram-bot",
+              "name": "YouTube Telegram Bot",
+              "source": {
+                "type": "git"
+              },
+              "dockerfile": {
+                "buildEngine": "kaniko",
+                "dockerfilePath": "/Dockerfile",
+                "dockerWorkDir": "/app"
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}
