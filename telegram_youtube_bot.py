@@ -13,7 +13,8 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
-import sqlite3
+# استبدال استيراد sqlite3 بـ database manager
+from database import create_database_manager, User, UploadLog
 from urllib.parse import urlencode
 
 # إعداد التسجيل
@@ -24,6 +25,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 class YouTubeTelegramBot:
+    # في بداية الكلاس __init__
     def __init__(self):
         # إعدادات البوت
         self.telegram_token = os.getenv('TELEGRAM_BOT_TOKEN', 'YOUR_BOT_TOKEN')
@@ -31,8 +33,10 @@ class YouTubeTelegramBot:
         self.youtube_client_secret = os.getenv('YOUTUBE_CLIENT_SECRET', 'YOUR_CLIENT_SECRET')
         self.redirect_uri = os.getenv('REDIRECT_URI', 'http://localhost:8080/callback')
         
-        # إعداد قاعدة البيانات
-        self.init_database()
+        # إعداد قاعدة البيانات PostgreSQL
+        self.db = create_database_manager()
+        if not self.db:
+            raise Exception("❌ فشل في الاتصال بقاعدة البيانات")
         
         # متغيرات مؤقتة لحفظ حالة المستخدمين
         self.user_states = {}
@@ -44,85 +48,34 @@ class YouTubeTelegramBot:
             'https://www.googleapis.com/auth/youtube.readonly'
         ]
 
-    def init_database(self):
-        """إنشاء قاعدة البيانات وجداولها"""
-        conn = sqlite3.connect('bot_database.db')
-        cursor = conn.cursor()
-        
-        # جدول المستخدمين
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS users (
-                user_id INTEGER PRIMARY KEY,
-                username TEXT,
-                access_token TEXT,
-                refresh_token TEXT,
-                token_expiry TEXT,
-                selected_channel_id TEXT,
-                selected_channel_name TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        # جدول سجل الرفع
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS upload_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                video_title TEXT,
-                video_id TEXT,
-                upload_status TEXT,
-                upload_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (user_id) REFERENCES users (user_id)
-            )
-        ''')
-        
-        conn.commit()
-        conn.close()
-
+    # استبدال دالة init_database
+    # حذف هذه الدالة لأن قاعدة البيانات تُدار الآن بواسطة DatabaseManager
+    # استبدال دالة get_user_credentials
     def get_user_credentials(self, user_id: int) -> Optional[Credentials]:
         """جلب بيانات المصادقة للمستخدم"""
-        conn = sqlite3.connect('bot_database.db')
-        cursor = conn.cursor()
+        user = self.db.get_user(user_id)
         
-        cursor.execute('''
-            SELECT access_token, refresh_token, token_expiry 
-            FROM users WHERE user_id = ?
-        ''', (user_id,))
-        
-        result = cursor.fetchone()
-        conn.close()
-        
-        if result:
-            access_token, refresh_token, token_expiry = result
-            if access_token:
-                creds = Credentials(
-                    token=access_token,
-                    refresh_token=refresh_token,
-                    token_uri='https://oauth2.googleapis.com/token',
-                    client_id=self.youtube_client_id,
-                    client_secret=self.youtube_client_secret
-                )
-                return creds
+        if user and user.access_token:
+            creds = Credentials(
+                token=user.access_token,
+                refresh_token=user.refresh_token,
+                token_uri='https://oauth2.googleapis.com/token',
+                client_id=self.youtube_client_id,
+                client_secret=self.youtube_client_secret,
+                expiry=user.token_expiry
+            )
+            return creds
         return None
 
+    # استبدال دالة save_user_credentials
     def save_user_credentials(self, user_id: int, credentials: Credentials):
         """حفظ بيانات المصادقة للمستخدم"""
-        conn = sqlite3.connect('bot_database.db')
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            INSERT OR REPLACE INTO users 
-            (user_id, access_token, refresh_token, token_expiry)
-            VALUES (?, ?, ?, ?)
-        ''', (
-            user_id,
-            credentials.token,
-            credentials.refresh_token,
-            credentials.expiry.isoformat() if credentials.expiry else None
-        ))
-        
-        conn.commit()
-        conn.close()
+        return self.db.save_user_credentials(
+            user_id=user_id,
+            access_token=credentials.token,
+            refresh_token=credentials.refresh_token,
+            token_expiry=credentials.expiry
+        )
 
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """أمر البداية"""
@@ -235,6 +188,7 @@ class YouTubeTelegramBot:
                 "❌ حدث خطأ في المصادقة. تأكد من صحة الرمز وحاول مرة أخرى."
             )
 
+    # تحديث دالة show_status
     async def show_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """عرض حالة المستخدم"""
         user_id = update.effective_user.id
@@ -243,22 +197,24 @@ class YouTubeTelegramBot:
         credentials = self.get_user_credentials(user_id)
         is_connected = credentials is not None
         
-        # جلب معلومات القناة المختارة
-        conn = sqlite3.connect('bot_database.db')
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT selected_channel_name FROM users WHERE user_id = ?
-        ''', (user_id,))
-        result = cursor.fetchone()
-        conn.close()
+        # جلب معلومات المستخدم
+        user = self.db.get_user(user_id)
+        selected_channel = user.selected_channel_name if user and user.selected_channel_name else None
         
-        selected_channel = result[0] if result and result[0] else None
+        # جلب الإحصائيات
+        stats = self.db.get_upload_stats(user_id)
         
         status_message = f"""
 📊 حالة الحساب:
 
 🔗 ربط YouTube: {'✅ مربوط' if is_connected else '❌ غير مربوط'}
 📺 القناة المختارة: {selected_channel if selected_channel else '❌ لم يتم الاختيار'}
+
+📈 الإحصائيات:
+📤 إجمالي الرفع: {stats['total']}
+✅ نجح: {stats['successful']}
+❌ فشل: {stats['failed']}
+📊 معدل النجاح: {stats['success_rate']:.1f}%
 
 {'✅ يمكنك الآن رفع الفيديوهات!' if is_connected and selected_channel else '⚠️ أكمل الإعداد لبدء الرفع'}
         """
@@ -268,6 +224,7 @@ class YouTubeTelegramBot:
             keyboard.append([InlineKeyboardButton("🔗 ربط حساب YouTube", callback_data='connect_youtube')])
         else:
             keyboard.append([InlineKeyboardButton("📺 اختيار قناة", callback_data='select_channel')])
+            keyboard.append([InlineKeyboardButton("📋 سجل الرفع", callback_data='upload_history')])
         
         reply_markup = InlineKeyboardMarkup(keyboard)
         
@@ -325,6 +282,7 @@ class YouTubeTelegramBot:
                 "❌ حدث خطأ في جلب القنوات. تأكد من صحة المصادقة."
             )
 
+    # تحديث دالة handle_channel_selection
     async def handle_channel_selection(self, update: Update, context: ContextTypes.DEFAULT_TYPE, channel_data: str):
         """معالجة اختيار القناة"""
         user_id = update.effective_user.id
@@ -336,21 +294,16 @@ class YouTubeTelegramBot:
             channel_name = parts[2]
             
             # حفظ القناة المختارة
-            conn = sqlite3.connect('bot_database.db')
-            cursor = conn.cursor()
-            cursor.execute('''
-                UPDATE users 
-                SET selected_channel_id = ?, selected_channel_name = ?
-                WHERE user_id = ?
-            ''', (channel_id, channel_name, user_id))
-            conn.commit()
-            conn.close()
+            success = self.db.update_user_channel(user_id, channel_id, channel_name)
             
-            await update.callback_query.edit_message_text(
-                f"✅ تم اختيار القناة: {channel_name}\n\n"
-                "يمكنك الآن إرسال الفيديوهات للرفع إلى YouTube!"
-            )
-            
+            if success:
+                await update.callback_query.edit_message_text(
+                    f"✅ تم اختيار القناة: {channel_name}\n\n"
+                    "يمكنك الآن إرسال الفيديوهات للرفع إلى YouTube!"
+                )
+            else:
+                await update.callback_query.answer("❌ حدث خطأ في حفظ القناة")
+                
         except Exception as e:
             logger.error(f"خطأ في اختيار القناة: {e}")
             await update.callback_query.answer("❌ حدث خطأ في اختيار القناة")
@@ -465,6 +418,7 @@ class YouTubeTelegramBot:
                     reply_markup=reply_markup
                 )
 
+    # تحديث دالة upload_to_youtube لحفظ السجل
     async def upload_to_youtube(self, update: Update, context: ContextTypes.DEFAULT_TYPE, privacy: str):
         """رفع الفيديو إلى YouTube"""
         user_id = update.effective_user.id
@@ -483,17 +437,10 @@ class YouTubeTelegramBot:
             credentials = self.get_user_credentials(user_id)
             youtube = build('youtube', 'v3', credentials=credentials)
             
-            # جلب معرف القناة
-            conn = sqlite3.connect('bot_database.db')
-            cursor = conn.cursor()
-            cursor.execute('''
-                SELECT selected_channel_id, selected_channel_name 
-                FROM users WHERE user_id = ?
-            ''', (user_id,))
-            result = cursor.fetchone()
-            conn.close()
-            
-            channel_id, channel_name = result
+            # جلب معلومات المستخدم والقناة
+            user = self.db.get_user(user_id)
+            channel_id = user.selected_channel_id
+            channel_name = user.selected_channel_name
             
             # إعداد بيانات الفيديو
             body = {
@@ -524,24 +471,31 @@ class YouTubeTelegramBot:
             
             response = insert_request.execute()
             video_id = response['id']
+            video_url = f"https://youtube.com/watch?v={video_id}"
             
-            # حفظ سجل الرفع
-            conn = sqlite3.connect('bot_database.db')
-            cursor = conn.cursor()
-            cursor.execute('''
-                INSERT INTO upload_logs 
-                (user_id, video_title, video_id, upload_status)
-                VALUES (?, ?, ?, ?)
-            ''', (user_id, video_info['title'], video_id, 'success'))
-            conn.commit()
-            conn.close()
+            # حفظ سجل الرفع الناجح
+            upload_data = {
+                'user_id': user_id,
+                'video_title': video_info['title'],
+                'video_description': video_info['description'],
+                'video_id': video_id,
+                'video_url': video_url,
+                'file_size': video_info.get('file_size'),
+                'duration': video_info.get('duration'),
+                'privacy_status': privacy,
+                'upload_status': 'success',
+                'channel_id': channel_id,
+                'channel_name': channel_name
+            }
             
+            self.db.log_upload(upload_data)
+        
             # رسالة النجاح
             success_message = f"""
 ✅ تم رفع الفيديو بنجاح!
 
 📹 العنوان: {video_info['title']}
-🔗 رابط الفيديو: https://youtube.com/watch?v={video_id}
+🔗 رابط الفيديو: {video_url}
 🔒 الخصوصية: {privacy}
 📺 القناة: {channel_name}
             """
@@ -561,16 +515,21 @@ class YouTubeTelegramBot:
             logger.error(f"خطأ في رفع الفيديو: {e}")
             
             # حفظ سجل الخطأ
-            conn = sqlite3.connect('bot_database.db')
-            cursor = conn.cursor()
-            cursor.execute('''
-                INSERT INTO upload_logs 
-                (user_id, video_title, video_id, upload_status)
-                VALUES (?, ?, ?, ?)
-            ''', (user_id, video_info.get('title', 'Unknown'), None, f'error: {str(e)}'))
-            conn.commit()
-            conn.close()
+            upload_data = {
+                'user_id': user_id,
+                'video_title': video_info.get('title', 'Unknown'),
+                'video_description': video_info.get('description', ''),
+                'file_size': video_info.get('file_size'),
+                'duration': video_info.get('duration'),
+                'privacy_status': privacy,
+                'upload_status': f'error',
+                'error_message': str(e),
+                'channel_id': user.selected_channel_id if user else None,
+                'channel_name': user.selected_channel_name if user else None
+            }
             
+            self.db.log_upload(upload_data)
+        
             await update.callback_query.edit_message_text(
                 "❌ حدث خطأ في رفع الفيديو إلى YouTube. حاول مرة أخرى."
             )
