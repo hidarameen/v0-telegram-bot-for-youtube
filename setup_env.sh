@@ -45,3 +45,11 @@ echo "   - للإنتاج: https://your-domain.com/auth/callback"
 echo ""
 echo "🔒 تذكر: لا تشارك ملف .env مع أحد!"
 echo "📁 ملف .env محمي بواسطة .gitignore"
+echo ""
+echo "4️⃣ (اختياري لكن موصى به) YOUTUBE_REFRESH_TOKEN لتفعيل الرفع بدون رابط المصادقة:"
+echo "   - احصل على Refresh Token لحساب YouTube الذي تريد الرفع عليه"
+echo "   - ضع القيمة في المتغير YOUTUBE_REFRESH_TOKEN داخل .env"
+echo ""
+echo "5️⃣ (اختياري) YOUTUBE_CHANNEL_ID و YOUTUBE_CHANNEL_NAME لتثبيت القناة الافتراضية:"
+echo "   - ضع معرف القناة في YOUTUBE_CHANNEL_ID"
+echo "   - ضع اسم القناة (اختياري) في YOUTUBE_CHANNEL_NAME"

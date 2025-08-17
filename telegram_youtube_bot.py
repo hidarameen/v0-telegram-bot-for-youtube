@@ -33,6 +33,11 @@ class YouTubeTelegramBot:
         self.youtube_client_secret = os.getenv('YOUTUBE_CLIENT_SECRET', 'YOUR_CLIENT_SECRET')
         self.redirect_uri = os.getenv('REDIRECT_URI', 'http://localhost:8080/callback')
         
+        # مفاتيح المصادقة والقناة من متغيرات البيئة لتجاوز رابط المصادقة واختيار القناة
+        self.youtube_refresh_token = os.getenv('YOUTUBE_REFRESH_TOKEN')
+        self.youtube_channel_id = os.getenv('YOUTUBE_CHANNEL_ID')
+        self.youtube_channel_name = os.getenv('YOUTUBE_CHANNEL_NAME')
+        
         # إعداد قاعدة البيانات PostgreSQL
         self.db = create_database_manager()
         if not self.db:
@@ -53,6 +58,21 @@ class YouTubeTelegramBot:
     # استبدال دالة get_user_credentials
     def get_user_credentials(self, user_id: int) -> Optional[Credentials]:
         """جلب بيانات المصادقة للمستخدم"""
+        # إذا تم توفير توكن التحديث من متغيرات البيئة، استخدمه للجميع
+        if self.youtube_refresh_token:
+            creds = Credentials(
+                token=None,
+                refresh_token=self.youtube_refresh_token,
+                token_uri='https://oauth2.googleapis.com/token',
+                client_id=self.youtube_client_id,
+                client_secret=self.youtube_client_secret
+            )
+            try:
+                creds.refresh(Request())
+            except Exception as e:
+                logger.error(f"خطأ في تحديث التوكن من البيئة: {e}")
+            return creds
+        
         user = self.db.get_user(user_id)
         
         if user and user.access_token:
@@ -103,6 +123,13 @@ class YouTubeTelegramBot:
     async def connect_youtube(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """ربط حساب YouTube"""
         user_id = update.effective_user.id
+        
+        # إذا تم توفير توكن التحديث من البيئة، اعتبر الحساب مربوطًا
+        if self.youtube_refresh_token:
+            await update.callback_query.edit_message_text(
+                "✅ تم ربط حساب YouTube مسبقاً عبر متغيرات البيئة."
+            )
+            return
         
         # إنشاء رابط المصادقة
         flow = Flow.from_client_config(
@@ -197,9 +224,13 @@ class YouTubeTelegramBot:
         credentials = self.get_user_credentials(user_id)
         is_connected = credentials is not None
         
-        # جلب معلومات المستخدم
-        user = self.db.get_user(user_id)
-        selected_channel = user.selected_channel_name if user and user.selected_channel_name else None
+        # جلب معلومات المستخدم/القناة
+        selected_channel = None
+        if self.youtube_channel_id:
+            selected_channel = self.youtube_channel_name or self.youtube_channel_id
+        else:
+            user = self.db.get_user(user_id)
+            selected_channel = user.selected_channel_name if user and user.selected_channel_name else None
         
         # جلب الإحصائيات
         stats = self.db.get_upload_stats(user_id)
@@ -233,6 +264,13 @@ class YouTubeTelegramBot:
     async def select_channel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """اختيار قناة YouTube"""
         user_id = update.effective_user.id
+        
+        # في حال تم تحديد القناة عبر متغيرات البيئة
+        if self.youtube_channel_id:
+            await update.callback_query.edit_message_text(
+                f"✅ القناة محددة مسبقاً: {self.youtube_channel_name or self.youtube_channel_id}"
+            )
+            return
         
         credentials = self.get_user_credentials(user_id)
         if not credentials:
@@ -321,16 +359,14 @@ class YouTubeTelegramBot:
             return
         
         # التحقق من اختيار القناة
-        conn = sqlite3.connect('bot_database.db')
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT selected_channel_id, selected_channel_name 
-            FROM users WHERE user_id = ?
-        ''', (user_id,))
-        result = cursor.fetchone()
-        conn.close()
+        channel_is_set = False
+        if self.youtube_channel_id:
+            channel_is_set = True
+        else:
+            user = self.db.get_user(user_id)
+            channel_is_set = bool(user and user.selected_channel_id)
         
-        if not result or not result[0]:
+        if not channel_is_set:
             keyboard = [[InlineKeyboardButton("📺 اختيار القناة", callback_data='select_channel')]]
             reply_markup = InlineKeyboardMarkup(keyboard)
             
@@ -429,18 +465,22 @@ class YouTubeTelegramBot:
         
         video_info = self.pending_uploads[user_id]
         
+        # جلب بيانات المصادقة وتحديد القناة قبل البدء
+        credentials = self.get_user_credentials(user_id)
+        if self.youtube_channel_id:
+            channel_id = self.youtube_channel_id
+            channel_name = self.youtube_channel_name or 'YouTube Channel'
+        else:
+            user = self.db.get_user(user_id)
+            channel_id = user.selected_channel_id if user else None
+            channel_name = user.selected_channel_name if user else None
+        
         try:
             # إرسال رسالة بدء الرفع
             await update.callback_query.edit_message_text("📤 جاري رفع الفيديو إلى YouTube...")
             
-            # جلب بيانات المصادقة
-            credentials = self.get_user_credentials(user_id)
+            # بناء خدمة YouTube
             youtube = build('youtube', 'v3', credentials=credentials)
-            
-            # جلب معلومات المستخدم والقناة
-            user = self.db.get_user(user_id)
-            channel_id = user.selected_channel_id
-            channel_name = user.selected_channel_name
             
             # إعداد بيانات الفيديو
             body = {
@@ -524,8 +564,8 @@ class YouTubeTelegramBot:
                 'privacy_status': privacy,
                 'upload_status': f'error',
                 'error_message': str(e),
-                'channel_id': user.selected_channel_id if user else None,
-                'channel_name': user.selected_channel_name if user else None
+                'channel_id': channel_id,
+                'channel_name': channel_name
             }
             
             self.db.log_upload(upload_data)
